@@ -1,0 +1,37 @@
+First, make sure you agree to all the terms stated in the COPYING file.
+Comments, suggestions or bug reports are welcome on the project sourcefourge page: ... to contact the individual
+developers see the AUTHORS file.
+
+
+grnotify
+---------
+
+grnotify is a simple Google Reader Notifier written in python, 
+it will show you the number of unread items you have.
+
+
+Dependencies
+--------------
+
+  * Python >= 2.2 <http://www.python.org>
+  * PyXML >= 0.8.3 <http://pyxml.sourceforge.net>
+  * PyGTK >= 2.0 <http://www.pygtk.org>
+
+Optional: python-notify if you want notification bubbles
+
+
+Installing
+------------
+
+You need root priviliges to install grnotify (a non-root version is on the todo list)
+
+the command is:
+
+ $sudo python install.py
+
+
+Using grnotify
+---------------
+
+You'll need to set your username and password in the preferences menu,
+after this, no further configuration is needed.

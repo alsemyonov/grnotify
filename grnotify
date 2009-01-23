@@ -1,0 +1,1483 @@
+#!/usr/bin/python
+import urllib
+import urllib2
+import xml.dom.minidom
+import time
+import os
+import StringIO
+import operator
+import threading
+import webbrowser
+
+
+try:
+    import gtk.glade
+    import egg.trayicon
+except:
+    sys.exit(1)
+
+try:
+    import pygtk
+    pygtk.require("2.0")
+except:
+    sys.exit(1)
+    
+try:
+    import pynotify
+    notificationEnabled = 1
+    notificationChosen = 0
+except:
+    notificationEnabled = 0
+    
+try:
+    import gnomekeyring
+    import gconf
+    useKeyRing = 1
+except:
+    useKeyRing = 0
+    
+
+    
+##############################
+#Create the config dir if it doesn't exist yet or was deleted
+#
+CONFIGMAP = os.path.join(os.environ['HOME'], '.grnotify/')
+if not os.path.exists(CONFIGMAP):
+    os.system('mkdir ' + CONFIGMAP)
+    os.system('chmod 777 ' + CONFIGMAP)
+    
+#todo: class structure instead of this ungodly mess with global variables    
+###############################
+#Variables
+#
+numberTitles = 20 #default amount of titles to get
+itemID = []
+uniqueFeeds = []
+feedslist = []
+items = []
+titles = []
+links = []
+noFeeds = 1
+openReader = 1
+feedsChanged = 0 #if numberFeeds has changed or not
+counter = 1 #boolean to show counter or not
+numberFeeds = 15 #default maximum number of feeds of which info is shows
+L = [] #contains feed ids and their number of unread items
+names = [] #contains names of all feeds
+feeds = 0 # number of feeds user is subscribed to
+waitTime = 60
+online = 1 #if we have internet
+config_changed=0
+VERSION = '1.0.2'
+email = ''
+passwd = ''
+cookies = -1
+old_unread = -1
+unread = 0
+extraInfo = 0
+tooltip = ''
+log_message = ''
+iconNew = '/usr/share/pixmaps/grnotify/new.gif'
+iconNonew = '/usr/share/pixmaps/grnotify/nonew.gif'
+iconBroken = '/usr/share/pixmaps/grnotify/broken.gif'
+bubble_timeout = 5000 #milliseconds
+GCONF_AUTH_KEY = "/apps/grnotify/keyring_auth_token"
+autohide = 0 #if true, the icon gets hidden when there are no unread items
+
+################################
+#Use cookies
+#
+COOKIEFILE = os.path.join(os.environ['HOME'], '.grnotify/cookies.lwp')
+# the path and filename to save your cookies in
+
+cj = None
+ClientCookie = None
+cookielib = None
+
+# Let's see if cookielib is available
+try:
+    import cookielib
+except ImportError:
+    # If importing cookielib fails
+    # let's try ClientCookie
+    try:
+        import ClientCookie
+    except ImportError:
+    # ClientCookie isn't available either
+        urlopen = urllib2.urlopen
+        Request = urllib2.Request
+    else:
+    # imported ClientCookie
+        urlopen = ClientCookie.urlopen
+        Request = ClientCookie.Request
+        cj = ClientCookie.LWPCookieJar()
+
+else:
+    # importing cookielib worked
+    urlopen = urllib2.urlopen
+    Request = urllib2.Request
+    cj = cookielib.LWPCookieJar()
+    # This is a subclass of FileCookieJar
+    # that has useful load and save methods
+
+if cj is not None:
+# we successfully imported
+# one of the two cookie handling modules
+    log_message += time.strftime('%X %x %Z') + ': Succefully imported a cookie library\n'
+    if os.path.isfile(COOKIEFILE):
+    # if we have a cookie file already saved
+    # then load the cookies into the Cookie Jar
+        cj.load(COOKIEFILE)
+
+    # Now we need to get our Cookie Jar
+    # installed in the opener;
+    # for fetching URLs
+    if cookielib is not None:
+    # if we use cookielib
+    # then we get the HTTPCookieProcessor
+    # and install the opener in urllib2
+        opener = urllib2.build_opener(urllib2.HTTPCookieProcessor(cj))
+        urllib2.install_opener(opener)
+
+    else:
+    # if we use ClientCookie
+    # then we get the HTTPCookieProcessor
+    # and install the opener in ClientCookie
+        opener = ClientCookie.build_opener(ClientCookie.HTTPCookieProcessor(cj))
+        ClientCookie.install_opener(opener)
+        
+else:
+    log_message += time.strftime('%X %x %Z') + ': Failed to import a cookie library\n'
+
+
+##########################
+#Get the login cookies
+#
+def getcookies ():
+    global log_message
+
+    log_message += time.strftime('%X %x %Z') +  ': Trying to get cookies\n'
+    url = 'https://www.google.com/accounts/ServiceLoginAuth'
+    user_agent = 'Mozilla/4.0 (compatible; MSIE 5.5; Windows NT)'
+    login = {'Email' : email,
+        'Passwd' : passwd}
+
+    data = urllib.urlencode(login)
+
+
+    theurl = url
+    # an example url that sets a cookie,
+    # try different urls here and see the cookie collection you can make !
+
+    txdata = data
+    # if we were making a POST type request,
+    # we could encode a dictionary of values here,
+    # using urllib.urlencode(somedict)
+
+    txheaders =  {'User-agent' : 'Mozilla/4.0 (compatible; MSIE 5.5; Windows NT)'}
+    # fake a user agent, some websites (like google) don't like automated exploration
+
+
+    try:
+        req = Request(theurl, txdata, txheaders)
+        # create a request object
+
+        handle = urlopen(req)
+        # and open it to return a handle on the url
+        del req
+
+    except IOError, e:
+        log_message += time.strftime('%X %x %Z') + ': Failed to get a connection\n'
+        return 2 		#we didn't get a connection
+
+    
+    if cj is None:		
+        log_message += time.strftime('%X %x %Z') + ': Failed to get cookies\n'
+        return 3 		#we got a connection, but didn't get any cookies
+    else:
+        cj.save(COOKIEFILE)                     # save the cookies again
+        log_message += time.strftime('%X %x %Z') + ': Succesfully got cookies\n'
+        return 1		#everything went ok
+
+##########################
+#Get the number of unread items
+#
+def getUnreadItems():
+    global unread, L, feeds, log_message
+    log_message += time.strftime('%X %x %Z') + ': Trying to get number of unread items\n'
+    LISTFILE = os.path.join(os.environ['HOME'], '.grnotify/list.xml')
+    url = 'https://www.google.com/reader/api/0/unread-count?all=true'
+    try:
+        req = Request(url)
+        response = urlopen(req)
+        del req
+    except IOError, e:
+        log_message += time.strftime('%X %x %Z') + ': Failed to get a connection\n'
+        return 2 		#we didn't get a connection
+    testxml = ''
+    try:
+        testxml = response.read()
+    except:
+        pass
+    del response
+    if '<object>' in testxml:
+        fileHandle = open ( LISTFILE, 'w' ) 
+        fileHandle.write (testxml)
+        del testxml
+        fileHandle.close()
+        fileHandle = open ( LISTFILE )
+        unread = xml.dom.minidom.parse(fileHandle)
+        fileHandle.close()
+        del fileHandle
+        countlist = unread.getElementsByTagName('number')
+        namelist = unread.getElementsByTagName('string')
+        for count in countlist:
+            if count.attributes["name"].value != 'count':
+                countlist.remove (count)
+        del unread
+        del L[:]
+        found = 0
+        for i in xrange (0, len(countlist)):
+            if 'state/com.google/reading-list' in namelist[i].firstChild.toxml():
+                unread =  countlist[i].firstChild.toxml()
+                found = 1
+            else:
+                L.append ((countlist[i].firstChild.toxml() , namelist[i].firstChild.toxml() ))
+        del countlist[:]
+        del namelist[:]
+        if not found:		#if there aren't any subscribed feeds
+            unread = '0'
+        L = sorted (L, compare)
+        feeds = len(L)
+        log_message += time.strftime('%X %x %Z') + ': Succesfully got unread items\n'
+        return 1
+    else:
+        log_message += time.strftime('%X %x %Z') + ': Failed to get a XML file from server\n'
+        return 0
+##################################
+#Set the names of feeds the user is subscribed to
+#
+def updateFeeds():
+    global names, feeds, noFeeds
+    global log_message
+    log_message += time.strftime('%X %x %Z') + ': Trying to update feeds\n'
+    LISTFILE = os.path.join(os.environ['HOME'], '.grnotify/names.xml')
+    url = 'http://www.google.com/reader/api/0/subscription/list'
+    try:
+        req = Request(url)
+        response = urlopen(req)
+        del req
+    except IOError, e:
+        log_message += time.strftime('%X %x %Z') + ': Failed to get a connection\n'
+        return 2 		#we didn't get a connection
+    testxml = ''
+    try:
+        testxml = response.read()	#read the opened page
+    except:
+        pass
+    del response
+    if '<object>' in testxml:	#if we got a XML file
+        fileHandle = open ( LISTFILE, 'w' ) 
+        fileHandle.write (testxml)
+        del testxml
+        fileHandle.close
+        fileHandle = open ( LISTFILE )
+        document = xml.dom.minidom.parse(fileHandle)
+        fileHandle.close()
+        del fileHandle
+        del names[:]
+        noFeeds = 1
+        feedlist = document.getElementsByTagName('string')
+        for j in xrange (0, len(feedlist)):
+            if (feedlist[j].attributes["name"].value == 'id' or feedlist[j].attributes["name"].value == 'title'):
+                if ('/state/com.google/broadcast' in feedlist[j].firstChild.toxml() or feedlist[j].firstChild.toxml()[0] != 'u'):
+                    names.append (feedlist[j].firstChild.toxml())
+                    noFeeds = 0
+        del document
+        del feedlist[:]
+        log_message += time.strftime('%X %x %Z') + ': Succesfully got updated feeds\n'
+    else:
+        log_message += time.strftime('%X %x %Z') + ': Failed to get a XML file from server\n'
+        
+def readFeeds():
+    global names, noFeeds
+    global log_message
+    log_message += time.strftime('%X %x %Z') + ': Trying to read feeds from file\n'
+    LISTFILE = os.path.join(os.environ['HOME'], '.grnotify/names.xml')
+    if os.path.isfile(LISTFILE):
+        fileHandle = open ( LISTFILE )
+        document = xml.dom.minidom.parse(fileHandle)
+        del names[:]
+        noFeeds = 1
+        feedlist = document.getElementsByTagName('string')
+        for j in xrange (0, len(feedlist)):
+            if (feedlist[j].attributes["name"].value == 'id' or feedlist[j].attributes["name"].value == 'title'):
+                if ('/state/com.google/broadcast' in feedlist[j].firstChild.toxml() or feedlist[j].firstChild.toxml()[0] != 'u'):
+                    names.append (feedlist[j].firstChild.toxml())
+                    noFeeds = 0
+        del document
+        del feedlist[:]
+        fileHandle.close()
+        log_message += time.strftime('%X %x %Z') + ': Succesfully read feeds from file\n'
+    else:
+        log_message += time.strftime('%X %x %Z') + ': Failed to read feeds from file, trying to update them now\n'
+        updateFeeds()
+#################################
+#Compare function to sort the feeds by number of unread items
+#
+def compare(a,b):
+    return cmp(int(b[0]), int(a[0]))
+##################################################
+# XOR encryption used to encrypt the config file
+def cryptXOR(filename):
+    global log_message
+    log_message += time.strftime('%X %x %Z') + ': Encrypting config file\n'
+    pw = os.environ['HOME']
+    f = open(filename, "rb")  # binary required
+    str2 = f.read()
+    f.close()
+    # create two streams in memory the size of the string str2
+    # one stream to read from and the other to write the XOR crypted character to
+    sr = StringIO.StringIO(str2)
+    sw = StringIO.StringIO(str2)
+    # make sure we start both streams at position zero (beginning)
+    sr.seek(0)
+    sw.seek(0)
+    n = 0
+    #str3 = ""  # test
+    for k in xrange(len(str2)):
+        # loop through password start to end and repeat
+        if n >= len(pw) - 1:
+            n = 0
+        p = ord(pw[n])
+        n += 1
+        
+        # read one character from stream sr
+        c = sr.read(1)
+        b = ord(c)
+        # xor byte with password byte
+        t = operator.xor(b, p)
+        z = chr(t)
+        # advance position to k in stream sw then write one character
+        sw.seek(k)
+        sw.write(z)
+        #str3 += z  # test
+    # reset stream sw to beginning
+    sw.seek(0)
+    # if filename was a normal text file, stream sw now contains the encrypted text
+    # and is written (binary required) to a file ending with .txp
+    f = open(filename, "wb")
+    f.write(sw.read())
+    f.close()
+    del f
+    
+    # clean up
+    sr.close()
+    sw.close()
+    del sr
+    del sw
+
+####################
+#Read settings from config file, create if none exists (this was used for CLI version)
+#
+#
+def Config():
+    global email
+    global passwd
+    CONFIGFILE = '/usr/share/grnotify/config'
+    if cookies != 0:
+        if not os.path.isfile(CONFIGFILE):
+            email = raw_input ('Username: ')
+            passwd = getpass.getpass('Password: ')
+            f = open (CONFIGFILE, 'w')
+            f.write (email + '\n' + passwd)
+            f.close()
+        else:
+            f = open(CONFIGFILE)
+            email = f.readline()
+            passwd = f.readline()
+            f.close()
+    else:
+        email = raw_input ('Username: ')
+        passwd = getpass.getpass('Password: ')
+        f = open (CONFIGFILE, 'w')
+        f.write (email + '\n' + passwd)
+        f.close()
+        
+
+###########################
+#read from the config file, if it exists
+#
+def readConfig():
+    global log_message
+    global email, passwd, waitTime, extraInfo, counter, numberFeeds, iconNew, iconNonew, iconBroken, useKeyRing
+    global notificationChosen, openReader, numberTitles, autohide
+    log_message += time.strftime('%X %x %Z') + ': Trying to read from config file\n'
+    CONFIGFILE = os.path.join(os.environ['HOME'], '.grnotify/config')
+    saveAgain = 0
+    if os.path.isfile(CONFIGFILE):		#if the config file exists
+        f = open(CONFIGFILE)
+	f.readline()
+	f.readline()
+	try:
+		temp = int (f.readline())
+		for line in f: pass
+		try:
+			useKeyRing = int (line)
+		except:
+			pass
+		f.close();
+	except:
+		notify ('Your config file might be corrupt, try removing ~/.grnotify/config if you keep having problems' )
+		cryptXOR (CONFIGFILE)
+		saveAgain = 1
+	f = open (CONFIGFILE)
+        email = f.readline()
+        if useKeyRing:
+            passwd = readKeyRing()
+        if passwd == '':
+            passwd = f.readline()
+        waitTime = f.readline()
+        try:
+            ugly = int (waitTime)
+        except:
+            waitTime = f.readline()
+        numberFeeds = f.readline()
+        counter = f.readline()
+        iconNew = f.readline()
+        iconNonew = f.readline()
+        iconBroken = f.readline()
+        notificationChosen = f.readline()
+        openReader = f.readline()
+        try:
+            openReader = int (openReader)
+        except:
+            openReader = 1
+        numberTitles = f.readline()
+        try:
+            numberTitles = int (numberTitles)
+        except:
+            numberTitles = 20
+	try:
+            autohide = int (f.readline())
+        except:
+            autohide = 0
+	if f.readline() is '':
+	    autohide = 0
+        f.close()
+        del f
+    else:
+        log_message += time.strftime('%X %x %Z') + ': Failed to read from config file: file doesn\'t exist\n'
+        configureWindow = configure_window()
+    try:
+        if waitTime != '':			#if we got a waitTime from the file
+            waitTime = int (waitTime)
+        else:
+            waitTime = 60
+        if numberFeeds != '':
+            numberFeeds = int(numberFeeds)
+        else:
+            numberFeeds = 15
+        if counter != '':
+            counter = int(counter)
+        else:
+            counter = 1
+        iconNew = iconNew.strip()
+        if iconNew == '' or not os.path.isfile(iconNew):
+            iconNew = '/usr/share/pixmaps/grnotify/new.gif'
+        iconNonew = iconNonew.strip()
+        if iconNonew == '' or not os.path.isfile(iconNonew):
+            iconNonew = '/usr/share/pixmaps/grnotify/nonew.gif'
+            iconBroken = '/usr/share/pixmaps/grnotify/broken.gif'
+        iconBroken = iconBroken.strip()
+        if notificationChosen != '':
+            notificationChosen = int (notificationChosen)
+        else:
+            notificationChosen = 0
+    except:
+        log_message += time.strftime('%X %x %Z') + ': Failed to read from config file: there seems to be something wrong with it\n'
+        configureWindow = configure_window()
+    log_message += time.strftime('%X %x %Z') + ': Succesfully read from configfile, waitTime = ' + str(waitTime) + ', extraInfo = ' + str(extraInfo) + '\n'
+    if saveAgain:
+	saveConfig()
+    
+
+def saveConfig():
+    global log_message
+    log_message += time.strftime('%X %x %Z') + ': Trying to save config file\n'
+    CONFIGFILE = os.path.join(os.environ['HOME'], '.grnotify/config')
+    f = open (CONFIGFILE, 'w')
+    f.write (email + '\n')
+    saved = 0
+    if useKeyRing:
+        saved = saveKeyRing()
+    if not saved:
+        f.write ( passwd + '\n')
+    f.write (str(waitTime) + '\n' + str(numberFeeds) + '\n' + str(counter) + '\n' + iconNew + '\n' + iconNonew + '\n' + iconBroken)
+    f.write ('\n' + str(notificationChosen) + '\n' + str (int(openReader)) + '\n' + str (numberTitles) + '\n' + str (autohide) + '\n' + str (useKeyRing))
+    f.close()
+    log_message += time.strftime('%X %x %Z') + ': Succesfully saved config file\n'
+
+def saveKeyRing():
+    keyring = "login"
+    try:
+        gnomekeyring.create_sync(keyring, None)
+    except gnomekeyring.AlreadyExistsError:
+        pass
+    
+    try:
+        auth_token = gnomekeyring.item_create_sync(
+            keyring,
+            gnomekeyring.ITEM_GENERIC_SECRET,
+            "grnotify user password",
+            dict(appname="grnotify"),
+            passwd, True)
+        gconf.client_get_default().set_int(GCONF_AUTH_KEY, auth_token)
+        return 1
+    except:
+        return 0
+
+def readKeyRing():
+    keyring = "login"
+    password = ''
+    try:  
+        gnomekeyring.create_sync(keyring, None)  
+    except gnomekeyring.AlreadyExistsError:  
+        pass 
+    auth_token = gconf.client_get_default().get_int(GCONF_AUTH_KEY)
+    if auth_token > 0:
+        try:
+            password = gnomekeyring.item_get_info_sync(keyring, 
+                        auth_token).get_secret()
+        except:
+            pass
+    return password
+
+def markAllRead(widget) :
+    global log_message
+    
+    try: 
+        getUnreadItems()
+        
+        req = Request ('http://www.google.com/reader/api/0/token')
+        f = urlopen (req)
+        token = f.read()
+
+        if (len(L) >= numberFeeds):
+            i = numberFeeds
+        else:
+            i =  len(L)
+        for i in xrange (0,i):
+            found = 0
+            for j in xrange (0, len(names)):
+                if not found:
+                    if (str(L[i][1]) == names[j] or '/state/com.google/broadcast-friends' in L[i][1]) and int (L[i][0]) != 0:
+                        found = 1
+                        data = { 's' : L[i][1], 'T' : token, 'ac' : 'subscribe' }
+                        data = urllib.urlencode (data)
+                        url = 'http://www.google.com/reader/api/0/mark-all-as-read'
+                        req = Request (url, data)
+                        f = urlopen (req)
+        del L[:]
+        
+        global feedsChganged
+        feedsChanged = 1		
+        updateFeeds()
+        refresh().start()
+        log_message += time.strftime('%X %x %Z') + ': Marked all items as read\n'
+    except:
+        log_message += time.strftime('%X %x %Z') + ': Failed marking all items as read\n'
+        pass
+
+def getUnreadTitles():
+    global titles, links, feedslist, itemID, log_message
+    try:
+        del titles
+        titles = []
+        del links
+        links = []
+        del itemID
+        itemID = []
+        if int(unread) != 0 and numberTitles != 0:
+            TITLESFILE = os.path.join(os.environ['HOME'], '.grnotify/titles.xml')
+            url = 'http://www.google.com/reader/atom/user/-/state/com.google/reading-list?xt=user/-/state/com.google/read&n=' + str(numberTitles)
+            try:
+                req = Request(url)
+                response = urlopen(req)
+                del req
+            except IOError, e:
+                log_message += time.strftime('%X %x %Z') + ': getUnreadTitles: Failed to get a connection\n'
+                return 2 		#we didn't get a connection
+            testxml = ''
+            try:
+                testxml = response.read()
+            except:
+                pass
+            del response
+            
+            if '<title>' in testxml:
+                fileHandle = open ( TITLESFILE, 'w' ) 
+                fileHandle.write (testxml)
+                del testxml
+                fileHandle.close()
+                fileHandle = open ( TITLESFILE )
+                items = xml.dom.minidom.parse(fileHandle)
+                fileHandle.close()
+                del fileHandle
+                titleslist = items.getElementsByTagName('title')
+                feedslist = items.getElementsByTagName ('source')
+                itemIDs = items.getElementsByTagName ('id')
+                link = items.getElementsByTagName ('link')
+                for i in range (0, titleslist.length):
+                    if i%2 is 1:
+                        titles.append( titleslist[i].firstChild.toxml().replace('amp;', '' ).replace("&quot;", '"'))
+                        itemID.append( itemIDs[i].firstChild.toxml())
+                
+                n = 1
+                
+                
+                for i in range (0, feedslist.length):
+                    #print items.getElementsByTagName('category')[i].getAttribute('term')
+                    feedslist[i] = feedslist[i].getAttribute('gr:stream-id')
+                    #print feedslist[i]
+                
+                j = 0
+                for i in range (0, link.length):
+                    if link[i].getAttribute('rel') == 'alternate':
+                        if n%2 is 1:
+                            links.append (link[i].getAttribute('href'))	
+                            j = j+1
+                    elif link[i].getAttribute('rel') == 'via':
+                        n = n+1
+                    else:
+                        n = n+1
+                    n = n+1
+                    
+                            
+    except:
+        log_message += time.strftime('%X %x %Z') + ': Failed getting item titles\n'
+        pass
+            
+class feedPopup:
+    def __init__(self):
+        CONFIG = '/usr/share/grnotify/'
+
+    #Create the dialog
+        self.gladefile = CONFIG + "feed.glade"
+        self.xml = gtk.glade.XML(self.gladefile)  
+        self.xml.signal_autoconnect(self)
+        self.window = self.xml.get_widget('main_window')
+        self.window.set_title('GrNotify: Add feed')
+    def on_close_button_clicked(self, button=None, data=None):
+    #Close the dialog
+        self.window.destroy()
+        
+    def on_save_button_clicked(self, button=None, data=None):
+        global log_message
+        try:
+            
+            feed = self.xml.get_widget('entry1').get_text()
+            self.window.destroy()
+            req = Request ('http://www.google.com/reader/api/0/token')
+            f = urlopen (req)
+            token = f.read()
+            
+            data = { 's' : 'feed/' + feed, 'T' : token, 'ac' : 'subscribe'}
+            data = urllib.urlencode (data)
+            url = 'http://www.google.com/reader/api/0/subscription/edit?client=contact:' + email
+            req = Request (url, data)
+            f = urlopen (req)
+            
+            global feedsChanged
+            feedsChanged = 1		
+            updateFeeds()
+            refresh().start()
+            
+            log_message += time.strftime('%X %x %Z') + ': Saved new feed\n'
+        except:
+            log_message += time.strftime('%X %x %Z') + ': Failed to save feed\n'
+            self.window.destroy()
+            pass
+            
+#########
+#GTK tray
+#	
+class grnotify(threading.Thread):
+    
+    #--------------------------------------------
+    # initialization
+    #--------------------------------------------
+
+    def __init__(self):
+        global log_message
+        log_message += time.strftime('%X %x %Z') + ': Starting tray icon\n'
+        # create a trayicon object
+        self.tray_icon = egg.trayicon.TrayIcon("grnotify")
+
+        # create a eventbox object which is going to be added to the trayicon object
+        self.grnotify_eventbox = gtk.EventBox()  
+
+        # add the eventbox object to the trayicon object for event handling (click, scroll)
+        self.tray_icon.add(self.grnotify_eventbox)
+        
+        # connect "click" event to their handlers
+        self.grnotify_eventbox.connect("button_press_event", self.clicked)
+        
+        
+        # create container
+        self.traycontainer = gtk.HBox()
+        
+        # create the image object
+        self.icon = gtk.Image()
+        # and the unread label
+        self.unread_label = gtk.Label('? ')
+        
+        # set the image pixmap
+        self.icon.set_from_file('/usr/share/pixmaps/grnotify/broken.gif')
+        # add the image object to the tray container
+        self.traycontainer.pack_start(self.icon, False, False, padding = 0)
+        self.traycontainer.pack_start(self.unread_label, False, False, padding = 0)
+        self.grnotify_eventbox.add(self.traycontainer)
+        
+        
+        # create the tooltip, pass it the actual information and add it to the grnotify_eventbox
+        self.tooltip = gtk.Tooltips()
+        self.tooltip_message = "Getting feed info"
+        self.tooltip.set_tip(self.grnotify_eventbox,self.tooltip_message)
+        self.tooltip.enable()
+        
+        # show the trayicon (+ etc.)
+        self.tray_icon.show_all() 
+        # self.properties = properties_dialog()
+        self.menu = tray_menu()
+        self.about = about_dialog()
+        log_message += time.strftime('%X %x %Z') + ': Succesfully created tray icon\n'
+
+    #
+    #---- clicked  :the eventbox (from the trayicon) click event handler
+    #       
+    def clicked(self,widget,event):
+        global log_message, openReader
+        # right click
+        if event.button == 3:
+            self.menu = tray_menu()
+        # open the tray_menu (includes quit and about)
+            self.menu.popup(event)
+            log_message += time.strftime('%X %x %Z') + ': Opened menu\n'
+        if event.button == 1:
+            if online and openReader:
+                openGoogleReader()
+            else:
+                global feedsChanged
+                feedsChanged = 1		
+                updateFeeds()
+                refresh().start()
+                    
+            
+            
+class about_dialog:
+    def create(self):
+        global log_message
+        log_message += time.strftime('%X %x %Z') + ': Trying to create about dialog\n'
+        CONFIG = '/usr/share/grnotify/'
+        # set the glade file
+        self.gladefile = CONFIG + "about.glade"  
+
+        # create the widget three  
+        self.wTree = gtk.glade.XML(self.gladefile, "window_about")
+        self.wTree.signal_autoconnect(self)
+
+        # create the "about" window
+        self.window = self.wTree.get_widget("window_about")
+        self.window.set_copyright("Version " + VERSION)
+        self.window.set_name("GrNotify")
+        #self.window.set_website("http://grnotify.sf.net")
+        self.window.set_website_label("http://grnotify.sf.net")
+        self.window.set_comments("GrNotify is a simple Python written\ntray application that will allow you\nto know when there are new items\nin the Google Reader.")
+        self.window.connect("response", lambda d, r: self.close())
+        log_message += time.strftime('%X %x %Z') + ': Created about dialog\n'
+
+    def close(self):
+        self.window.destroy()
+
+    def on_close_button_clicked(self, button=None, data=None):
+    #Close the dialog
+        self.window.destroy()
+        
+#This function needs some kind of standarisation
+def openGoogleReader(widget = None):
+    global log_message
+    log_message += time.strftime('%X %x %Z') + \
+		   ': Trying to open Google Reader homepage\n'
+    url = "https://www.google.com/accounts/ServiceLoginAuth?" + \
+	  urllib.urlencode({'Email':email}) + "&" + \
+	  urllib.urlencode({'Passwd':passwd}) + \
+	  "&service=reader&continue=" + \
+	  "https://www.google.com/reader&nui=1" 
+    open_website(widget, url)
+    log_message += time.strftime('%X %x %Z') + \
+		   ': Opened Google Reader homepage\n'
+
+def open_website(widget, data):
+    webbrowser.open_new_tab(data)
+    
+def openlink(item):
+    global log_message
+    try:
+        n = 0
+        j = 0
+        for i in items:
+            if i == item:
+                webbrowser.open (links[n])
+                j = n
+            n = n+1
+            
+        req = Request ('http://www.google.com/reader/api/0/token')
+        f = urlopen (req)
+        token = f.read()
+        
+        data = { 'i' : itemID[j], 's' : feedslist[j], 'T' : token, 'ac' : 'edit-tags' , 'a' : 'user/-/state/com.google/read' }
+        data = urllib.urlencode (data)
+        url = 'http://www.google.com/reader/api/0/edit-tag'
+        req = Request (url, data)
+        f = urlopen (req)
+        
+        global feedsChanged
+        feedsChanged = 1		
+        updateFeeds()
+        refresh().start()
+    except:
+        log_message += time.strftime('%X %x %Z') + ': Failed to open item link\n'
+
+gtk.about_dialog_set_url_hook(open_website) #Needed for the about dialog
+
+######################### BEGIN CLASS TRAY MENU ##########################
+#Create the configure window
+#Written by Kristof Bamps @ Feb 5 2008
+#
+class tray_menu:
+    def __init__(self):
+        global log_message
+    # create the window object - instance of gtk.Menu
+        log_message += time.strftime('%X %x %Z') + ': Trying to create tray menu\n'
+        self.window = gtk.Menu()
+        self.menubar = gtk.MenuBar()
+
+    # create the menu separator menu item object
+        menu_item_refresh = gtk.ImageMenuItem('gtk-refresh',None)
+        menu_item_refresh.connect('activate',self.refresh_clicked)
+        
+        menu_google_reader = gtk.ImageMenuItem ('Open Google Reader', None)
+        menu_google_reader.connect ('activate', openGoogleReader)
+        
+        menu_mark_read = gtk.ImageMenuItem ('Mark all as read', None)
+        menu_mark_read.connect('activate',markAllRead)
+        if (int(unread) == 0):
+            menu_mark_read.set_sensitive (0)
+
+        menu_item_feed = gtk.ImageMenuItem ('Subscribe to feed', None)
+        menu_item_feed.connect('activate',self.feed_clicked)
+
+        # create the about menu item object with it's icon
+        menu_item_about = gtk.ImageMenuItem('gtk-about',None)
+
+        # connect a handler to it
+        menu_item_about.connect('activate',self.about_clicked)
+        menu_item_preferences = gtk.ImageMenuItem('gtk-preferences',None)
+        menu_item_preferences.connect('activate',self.preferences_clicked)
+
+        # add the preferences menu item
+        if openReader:
+            self.window.add(menu_item_refresh)
+            self.window.add(menu_google_reader)
+        else:
+            self.window.add(menu_google_reader)
+            self.window.add(menu_item_refresh)
+        self.window.add(menu_mark_read)
+        self.window.add(menu_item_feed)
+        self.window.add(menu_item_preferences)
+        self.window.add (gtk.SeparatorMenuItem())
+        
+        view_item = gtk.Menu()
+        menu_view_item = gtk.MenuItem ('View Items', None)		
+        menu_view_item.set_submenu (view_item)
+        self.setTitels(view_item)
+        if (int(unread) == 0 or numberTitles == 0):
+            menu_view_item.set_sensitive (0)
+        self.window.add (menu_view_item)
+        
+        self.window.add (gtk.SeparatorMenuItem())
+    # add the about menu item to the menu object
+        self.window.add(menu_item_about)
+        
+    # create the quit menu item object with it's icon
+        menu_item_quit = gtk.ImageMenuItem('gtk-quit',None)
+
+    # connect a handler to it
+        menu_item_quit.connect('activate',self.exit)
+
+    # add the quit menu item to the menu object    
+        self.window.add(menu_item_quit)
+        
+    # show the menu
+        self.window.show_all() 
+    
+        log_message += time.strftime('%X %x %Z') + ': Created tray menu\n'
+    
+    def setTitels(self, menu) :
+        try:
+            global items, log_message
+            del items
+            items = []
+            i = 0
+            if int(unread) <= 10 or numberTitles <= 10:
+                for titel in titles:
+                    items.append (gtk.MenuItem (titel, None))
+                    items[i].connect ('activate', openlink)
+                    menu.add (items[i])
+                    i = i+1
+                    
+            else:
+                feedMenus = []
+                feedItems = []
+                feedNames = []
+                obsolete = []
+                for feed in uniqueFeeds:
+                    feedItems.append( gtk.MenuItem (feed[0], None))
+                    feedMenus.append( gtk.Menu())
+                    feedItems[i].set_submenu (feedMenus[i])
+                    obsolete.append (1)
+                    i=i+1
+                n = i
+                i = 0
+                k = 0
+                for titel in titles:
+                    #print titel
+		    friendsSpot = -1
+		    added = 0
+                    for j in range (0, n):
+                        if (i < len(feedslist)):
+                            if feedslist[i] == uniqueFeeds[j][1]:
+                                obsolete [j] = 0
+                                items.append (gtk.MenuItem (titel, None))
+                                items[k].connect ('activate', openlink)
+                                feedMenus[j].add(items[k])
+				added = 1
+                                k = k+1
+                            elif 'com.google/broadcast-friends' in uniqueFeeds[j][1]:
+				friendsSpot = j
+                    if not added:
+			obsolete [friendsSpot] = 0
+                        items.append (gtk.MenuItem (titel, None))
+                        items[k].connect ('activate', openlink)
+                        feedMenus[friendsSpot].add(items[k])
+                        k = k+1
+                    i = i+1
+                    
+                for j in range (0, n):
+                    if obsolete[j] != 1:
+                        menu.add(feedItems[j])
+        except:
+            log_message += time.strftime('%X %x %Z') + ': Failed setting titles in menu\n'
+            pass
+                    
+            
+        
+    def exit(self,widget):
+    # quit menu item handler -> quit the application 
+        global log_message
+        log_message += time.strftime('%X %x %Z') + ': Exiting program\n'
+        log()
+        os.system("kill " + str (os.getpid()))
+        
+    def feed_clicked (self, widget):
+        popup = feedPopup()
+        
+    def refresh_clicked (self, widget):
+        global feedsChanged
+        feedsChanged = 1		
+        updateFeeds()
+        refresh().start()
+    
+    def preferences_clicked (self, widget):
+        configureWindow = configure_window()
+    
+    def about_clicked(self,widget):
+    # about menu item handler -> create the about window
+        grnotify_app.about.create()
+        
+    def popup(self,event):
+    # popup-show the menu
+        self.window.popup( None, None, None, 0, event.time); 
+    
+    def close(self,widget):
+        # the warning close button has been clicked (or the window was closed else way)
+        grnotify_app.warning_close_button = True
+        
+        # the window isn't opened
+        grnotify_app.warning_window_opened = False
+        self.window.destroy()
+
+########################## END CLASS TRAY MENU ###########################
+
+######################### BEGIN CLASS CONFIGURE WINDOW ##########################
+#Create the configure window
+#Written by Kristof Bamps @ Feb 5 2008
+#Recent updates
+# Kristof Bamps @ Feb 5 2008 - 19:41
+#	+ Added WaitTime System
+# Eric Lembregts @ Feb 5 2008 - 18:30
+#	+ Added Comments
+#	- Removed Refresh Button
+#
+class configure_window:
+    def __init__(self):
+        global log_message
+    #Set variables
+        log_message += time.strftime('%X %x %Z') + ': Trying to create configure window\n'
+        CONFIG = '/usr/share/grnotify/'
+
+    #Create the dialog
+        self.gladefile = CONFIG + "config.glade"
+        self.xml = gtk.glade.XML(self.gladefile)  
+        self.xml.signal_autoconnect(self)
+        self.window = self.xml.get_widget('main_window')
+
+    #Set the dialog title
+        self.window.set_title('GrNotify (version ' + VERSION + ')')
+
+    #Set the default username / password and waitTime values from the config file
+        if email != '' and passwd != '':
+            self.xml.get_widget('username_entry2').set_text(email.strip())
+            self.xml.get_widget('password_entry2').set_text(passwd.strip())
+        self.xml.get_widget('spinbutton1').set_text( str( ( waitTime - waitTime % 60 ) / 60) )
+        self.xml.get_widget('spinbutton2').set_text( str( waitTime % 60 ) )
+        self.xml.get_widget('spinbutton3').set_text( str( numberFeeds ) )
+        if( counter == 1 ):	
+            self.xml.get_widget('showcounter1').set_active(1)
+        if notificationChosen == 1:
+            self.xml.get_widget('showpopups1').set_active(1)
+        log_message += time.strftime('%X %x %Z') + ': Created configure window\n'
+        #Set the appropriate images to the icon chosers!!!		
+        self.xml.get_widget('imagechooseiconnew2').set_from_file(iconNew)
+        self.xml.get_widget('buttonchooseiconnew2').connect("clicked", self.iconclicked, "new")
+        self.xml.get_widget('imagechooseiconnonew2').set_from_file(iconNonew)
+        self.xml.get_widget('buttonchooseiconnonew2').connect("clicked", self.iconclicked, "nonew")
+        self.xml.get_widget('imagechooseiconbroken2').set_from_file(iconBroken)
+        self.xml.get_widget('buttonchooseiconbroken2').connect("clicked", self.iconclicked, "broken")
+        self.xml.get_widget('combobox2').set_active(not openReader)
+	self.xml.get_widget('autohide').set_active(autohide)
+	self.xml.get_widget('gnomekeyring').set_active(useKeyRing)
+        self.xml.get_widget('spinbutton4').set_text( str( numberTitles ) )
+        self.fileiconbroken = ''
+        self.fileiconnew = ''
+        self.fileiconnonew = ''
+
+    def reseticonsclicked(self, widget, data=None):
+        self.xml.get_widget('imagechooseiconnew2').set_from_file('/usr/share/pixmaps/grnotify/new.gif')
+        self.fileiconnew = 'reset'
+        self.xml.get_widget('imagechooseiconnonew2').set_from_file('/usr/share/pixmaps/grnotify/nonew.gif')
+        self.fileiconnonew = 'reset'
+        self.xml.get_widget('imagechooseiconbroken2').set_from_file('/usr/share/pixmaps/grnotify/broken.gif')
+        self.fileiconbroken = 'reset'
+
+    def iconclicked(self, widget, data=None):
+        self.fileselect = gtk.FileSelection(title='Pick a new icon for ' + data.capitalize())
+        self.fileselect.ok_button.connect("clicked", self.iconget, data)
+        self.fileselect.set_icon_from_file('/usr/share/pixmaps/grnotify/nonew.gif')
+        self.fileselect.cancel_button.connect("clicked", lambda w: self.fileselect.destroy())
+
+        self.fileselect.show()
+
+    def iconget(self, widget, data=None):
+        filename = self.fileselect.get_filename()
+        self.fileselect.destroy()
+        
+        if(not filename.endswith('.gif') and not filename.endswith('.png') and not filename.endswith('.xpm')):
+            return
+        
+        if(not os.stat(filename).st_size > 0):
+            return
+
+        
+        if ( data == 'new' ):
+            gtk.gdk.pixbuf_new_from_file(filename).scale_simple(24, 24, gtk.gdk.INTERP_NEAREST).save(os.path.join(os.environ['HOME'], '.grnotify/newtemp.png'), "png", {})
+            self.fileiconnew = 'changed'
+        elif ( data == 'nonew' ):
+            gtk.gdk.pixbuf_new_from_file(filename).scale_simple(24, 24, gtk.gdk.INTERP_NEAREST).save(os.path.join(os.environ['HOME'], '.grnotify/nonewtemp.png'), "png", {})
+            self.fileiconnonew = 'changed'
+        else:
+            gtk.gdk.pixbuf_new_from_file(filename).scale_simple(24, 24, gtk.gdk.INTERP_NEAREST).save(os.path.join(os.environ['HOME'], '.grnotify/brokentemp.png'), "png", {})
+            self.fileiconbroken = 'changed'
+        self.xml.get_widget('imagechooseicon' + data).set_from_file(os.path.join(os.environ['HOME'], '.grnotify/' + data + 'temp.png'))
+
+    def get_info(self):	
+        global log_message
+    #Get global access to variables waitTime, email and passwd
+        global waitTime
+        global email
+        global passwd
+        global counter, numberFeeds, feedsChanged, notificationChosen
+        global iconNew, iconNonew, iconBroken #By Eric Lembregts for changable icons
+        global openReader, numberTitles, autohide, useKeyRing
+        log_message += time.strftime('%X %x %Z') + ': Trying to set fields in configure window\n'
+    #Set the global variables to their respective text fields
+        email = self.xml.get_widget('username_entry2').get_text()
+        passwd = self.xml.get_widget('password_entry2').get_text()
+        waitTime =int( self.xml.get_widget('spinbutton1').get_text()) * 60
+        waitTime += int( self.xml.get_widget('spinbutton2').get_text())
+        if (waitTime < 30):
+            waitTime = 30
+        if( self.fileiconnew == 'changed' ):
+            gtk.gdk.pixbuf_new_from_file(os.path.join(os.environ['HOME'], '.grnotify/newtemp.png')).save(os.path.join(os.environ['HOME'], '.grnotify/iconnew.png'), "png", {})
+            iconNew = os.path.join(os.environ['HOME'], '.grnotify/iconnew.png')
+        if( self.fileiconnonew == 'changed' ):
+            gtk.gdk.pixbuf_new_from_file(os.path.join(os.environ['HOME'], '.grnotify/nonewtemp.png')).save(os.path.join(os.environ['HOME'], '.grnotify/iconnonew.png'), "png", {})
+            iconNonew = os.path.join(os.environ['HOME'], '.grnotify/iconnonew.png')
+        if (self.fileiconbroken == 'changed'):
+            gtk.gdk.pixbuf_new_from_file(os.path.join(os.environ['HOME'], '.grnotify/brokentemp.png')).save(os.path.join(os.environ['HOME'], '.grnotify/iconbroken.png'), "png", {})
+            iconBroken = os.path.join(os.environ['HOME'], '.grnotify/iconbroken.png')
+        if (self.fileiconnew == 'reset'):
+            iconNew = '/usr/share/pixmaps/grnotify/new.gif'
+            iconNonew = '/usr/share/pixmaps/grnotify/nonew.gif'
+            iconBroken = '/usr/share/pixmaps/grnotify/broken.gif'
+        numberFeeds = int (self.xml.get_widget('spinbutton3').get_text())
+        counter = int ( self.xml.get_widget('showcounter1').get_active() )
+        notificationChosen = int ( self.xml.get_widget('showpopups1').get_active() )
+        openReader = not int (self.xml.get_widget('combobox2').get_active())
+	autohide = int (self.xml.get_widget('autohide').get_active())
+	useKeyRing = int (self.xml.get_widget('gnomekeyring').get_active())
+        numberTitles = int (self.xml.get_widget('spinbutton4').get_text())
+        log_message += time.strftime('%X %x %Z') + ': Succesfully set fields\n'
+
+    def on_save_button_clicked(self, button=None, data=None):
+    #Get global access to the config_changed variable
+        global config_changed, log_message, feedsChanged
+        log_message += time.strftime('%X %x %Z') + ': Save button clicked\n'
+        #Aquire the new data
+        self.get_info()	
+
+        #Save the new data to the config file
+        saveConfig()
+        feedsChanged = 1
+        #Retrieve information from tha API with the new details
+        #Disabled because it would slow down the save function for big xml lists (by Eric)
+        #Doesn't make sense: the feed name list wouldn't be updated (by kristof)
+        refresh().start()
+        log_message += time.strftime('%X %x %Z') + ': Config saved + icon refreshed\n'
+
+        #Close the dialog
+        self.window.destroy()
+
+    def on_close_button_clicked(self, button=None, data=None):
+    #Close the dialog
+        self.window.destroy()
+########################## END CONFIGURE WINDOW ###########################
+
+######################### BEGIN FUNCTION TRAY ICON UPDATER ##########################
+#Update the tray icon
+#
+#Note this class is deprecated and should be replaced with a more logic one... (Todo)
+class updater(threading.Thread):
+    # a thread for updating the time label to actual time
+    def run(self):
+        global old_unread, unread, tooltip, log_message, feedsChanged, online, noFeeds, titles
+        global config_changed, uniqueFeeds
+        readConfig()
+        cookies = getcookies()
+        while (1):
+            try:
+                online = 1
+                if (cookies == 1):
+                    cookies = getUnreadItems()
+                if (cookies == 0):
+                    updateTrayText('Wrong username or password')
+                    tooltip = ''
+                    online = 0
+                if (cookies == 2 ):
+                    updateTrayText('Could not establish a connection to server')
+                    online = 0
+                    tooltip = ''
+                if (cookies == 3):
+                    updateTrayText('Could not get cookies')
+                    tooltip = ''
+                if (cookies != 1):
+                    updateTrayIcon(0)
+                    cookies = getcookies()
+                else:
+                    if (int(unread) >= 1000):
+                        unread = 0
+                        for i in xrange (0, len(L)):
+                            unread += int(L[i][0])
+                        unread = str(unread)					
+                    
+                    updateTray()
+                    
+                    if (old_unread != unread or feedsChanged):	#if there are new unread items, update the feed names and numbers
+                        feedsChanged = 0
+                        
+                        if noFeeds :
+                            updateFeeds()
+                        else:
+                            readFeeds()
+                    
+                        uniqueFeeds = []
+                        updateTray()
+                        getUnreadTitles()
+                        
+                        if (len(L) >= numberFeeds):
+                            i = numberFeeds
+                        else:
+                            i =  len(L)
+                        del tooltip
+                        tooltip = ''
+                        for i in xrange (0,i):
+                            found = 0
+                            for j in xrange (0, len(names)):
+                                if not found:
+                                    if (str(L[i][1]) == names[j] or '/state/com.google/broadcast-friends' in L[i][1]) and int (L[i][0]) != 0:
+                                        found = 1
+                                        if ('/state/com.google/broadcast-friends' in L[i][1]):
+                                            uniqueFeeds.append (('Friend\'s shared items', L[i][1]))
+                                            tooltip += '\n' + 'Friend\'s shared items : ' + str(L[i][0])
+                                        else:
+                                            uniqueFeeds.append ((names[j+1], L[i][1]))
+                                            tooltip += '\n' + names[j+1] + ' : ' + str(L[i][0])
+                del L[:]   #set the table back to empty, so same items don't get added time after time
+                gtk.gdk.threads_enter()
+                grnotify_app.tooltip_message += tooltip
+                grnotify_app.tooltip.set_tip(grnotify_app.grnotify_eventbox,grnotify_app.tooltip_message)		
+                log_message += time.strftime('%X %x %Z') + ': Set tooltip to: ' + grnotify_app.tooltip_message + '\n' 
+                if (old_unread != unread or feedsChanged):
+                    if notificationEnabled  and notificationChosen and old_unread < unread:
+                        notification()
+                gtk.gdk.threads_leave()
+                old_unread = unread
+                if int (unread) != 0 and titles == []:
+                    getUnreadTitles()
+                log()
+
+                time.sleep(waitTime)
+                
+            except:
+                log_message += time.strftime('%X %x %Z') + ': Auto updater failed! Trying to continue\n'
+                log()
+                time.sleep(waitTime)
+                pass
+########################## END FUNCTION TRAY ICON UPDATER ###########################
+
+def updateTray ():
+    if (noFeeds == 1):
+        updateTrayIcon(0)
+        updateTrayText('You are not subscribed to any feeds')
+    elif (unread == '0'):
+        updateTrayIcon(2)
+        updateTrayText('No unread items')
+    elif (unread == '1'):
+        updateTrayIcon(1)
+        updateTrayText(unread + ' unread item')
+    else:
+        updateTrayIcon(1)
+        updateTrayText(unread + ' unread items')
+######################### BEGIN FUNCTION TRAY ICON UPDATER ##########################
+#Update the tray icon
+#Written by Eric Lembregts @ Tuesday Feb 5 2008 - 19:18
+#
+def updateTrayIcon(status):
+    #Set the tray icon to status 0 -> Something is broken
+    if (status == 0):
+        grnotify_app.icon.set_from_file(iconBroken)
+        grnotify_app.icon.show_all()
+        grnotify_app.unread_label.set_text('? ')
+        grnotify_app.unread_label.show_all()
+    #Set the tray icon to status 1 -> New items!
+    elif (status == 1):
+        grnotify_app.icon.set_from_file(iconNew)
+        grnotify_app.icon.show_all()
+        grnotify_app.unread_label.set_text(str(unread) + ' ')
+        grnotify_app.unread_label.show_all()
+    #Set the tray icon to status 2 -> No new items :(
+    elif (status == 2 and autohide):
+        grnotify_app.icon.hide()
+        grnotify_app.unread_label.hide()
+    elif (status == 2):
+        grnotify_app.icon.set_from_file(iconNonew)
+        grnotify_app.unread_label.set_text(str(unread)+ ' ')
+    if counter != 1 or str (unread) == '0':
+        grnotify_app.unread_label.set_text('')
+        grnotify_app.unread_label.show_all()
+    
+########################## END FUNCTION TRAY ICON UPDATER ###########################
+##############################
+#Write a message to the log (happens after every update)
+#
+def log():
+    global log_message
+    LOGFILE = os.path.join(os.environ['HOME'], '.grnotify/log.txt')
+    if os.path.exists(LOGFILE):
+        loginfo = os.stat(LOGFILE)
+        #delete the logfile if it exceeds 200 kb
+        if loginfo.st_size >= 200000:
+            os.system('rm ' + LOGFILE)	
+        del loginfo
+    fileHandler = open (LOGFILE, 'a')
+    fileHandler.write (log_message)
+    fileHandler.close()
+    del log_message
+    log_message = ''
+#	try:
+#		from guppy import hpy; h=hpy()
+#		h.heap()
+#	except:
+#		pass
+
+######################### BEGIN FUNCTION SET TRAY TEXT ##########################
+#Update the tray text
+#Written by Eric Lembregts @ Tuesday Feb 5 2008 - 19:24
+#
+def updateTrayText(replaceText):
+    #Set the tray text to replaceText
+    grnotify_app.tooltip_message = replaceText
+########################## END FUNCTION SET TRAY TEXT###########################
+#####################
+#popup notification
+#
+def notification():
+    global log_message
+    try:
+        if pynotify.init("GrNotify Notification Bubble"):
+            if int(unread) == 1:
+                bubble = pynotify.Notification("GrNotify", "You have 1 unread item", None, grnotify_app.grnotify_eventbox)
+            elif old_unread == -1 and unread > 0: #on program startup, don't notify when no icon present (no unread items)
+                bubble = pynotify.Notification("GrNotify", "You have " + unread + " unread items", None, grnotify_app.grnotify_eventbox)
+            elif int(unread) > 1:
+                if (int(unread) - int (old_unread) == 1):
+                    bubble = pynotify.Notification("GrNotify", "You have " + str(int(unread) - int(old_unread)) + " new unread item\n(" + str(unread)  + " total)", None, grnotify_app.grnotify_eventbox)
+                else:
+                    bubble = pynotify.Notification("GrNotify", "You have " + str(int(unread) - int(old_unread)) + " new unread items\n(" + str(unread)  + " total)", None, grnotify_app.grnotify_eventbox)
+            if int(unread) > 0 or old_unread == -1: #extra parameters only if object exists
+                bubble.set_urgency(pynotify.URGENCY_NORMAL)
+                bubble.set_timeout(bubble_timeout)
+            if int(unread) - int(old_unread) > 0 or old_unread == -1:
+                try:
+                    bubble.show()
+                except:
+                    pass
+            del bubble
+            log_message += time.strftime('%X %x %Z') + ': Succesfully showed notification bubble\n'
+    except:
+        pass
+        
+def notify(message):
+	try:
+		if pynotify.init("GrNotify Notification Bubble"):
+		        bubble = pynotify.Notification("GrNotify", message, None, grnotify_app.grnotify_eventbox)
+			bubble.set_urgency(pynotify.URGENCY_NORMAL)
+		        bubble.set_timeout(bubble_timeout)
+			try:
+		            bubble.show()
+		        except:
+		            pass
+	except:
+		pass
+
+#Refresh 1 time
+#
+#Note this function is deprecated and should be replaced with a more logic one... (Todo)
+class refresh(threading.Thread):
+    def run(self): 
+        global old_unread, unread, names, L, tooltip, feedsChanged, online, uniqueFeeds, log_message
+        try:
+            readConfig()
+            cj.clear_session_cookies()
+            cookies = getcookies()
+            cookies = getUnreadItems()
+            online = 1
+            if (cookies == 1):
+                cookies = getUnreadItems()
+            if (cookies == 0):
+                updateTrayText('Wrong username or password')
+                tooltip = ''
+                online = 0
+            if (cookies == 2 ):
+                updateTrayText('Could not establish a connection to server')
+                online = 0
+                tooltip = ''
+            if (cookies == 3):
+                updateTrayText('Could not get cookies')
+                tooltip = ''
+            if (cookies != 1):
+                updateTrayIcon(0)
+                cookies = getcookies()
+            else:
+                if (int(unread) >= 1000):
+                    unread = 0
+                    for i in xrange (0, len(L)):
+                        unread += int(L[i][0])
+                    unread = str(unread)					
+                
+                updateTray()
+                
+                if (old_unread != unread or feedsChanged):	#if there are new unread items, update the feed names and numbers
+                    feedsChanged = 0
+                    
+                    if noFeeds :
+                        updateFeeds()
+                    else:
+                        readFeeds()
+                
+                    uniqueFeeds = []
+                    updateTray()
+                    getUnreadTitles()
+                    
+                    if (len(L) >= numberFeeds):
+                        i = numberFeeds
+                    else:
+                        i =  len(L)
+                    del tooltip
+                    tooltip = ''
+                    for i in xrange (0,i):
+                        found = 0
+                        for j in xrange (0, len(names)):
+                            if not found:
+                                if (str(L[i][1]) == names[j] or '/state/com.google/broadcast-friends' in L[i][1]) and int (L[i][0]) != 0:
+                                    found = 1
+                                    if ('/state/com.google/broadcast-friends' in L[i][1]):
+                                        uniqueFeeds.append (('Friend\'s shared items', L[i][1]))
+                                        tooltip += '\n' + 'Friend\'s shared items : ' + str(L[i][0])
+                                    else:
+                                        uniqueFeeds.append ((names[j+1], L[i][1]))
+                                        tooltip += '\n' + names[j+1] + ' : ' + str(L[i][0])
+            del L[:]   #set the table back to empty, so same items don't get added time after time
+            gtk.gdk.threads_enter()
+            grnotify_app.tooltip_message += tooltip
+            grnotify_app.tooltip.set_tip(grnotify_app.grnotify_eventbox,grnotify_app.tooltip_message)		
+            log_message += time.strftime('%X %x %Z') + ': Set tooltip to: ' + grnotify_app.tooltip_message + '\n' 
+            if (old_unread != unread or feedsChanged):
+                if notificationEnabled  and notificationChosen and old_unread < unread:
+                    notification()
+            gtk.gdk.threads_leave()
+            old_unread = unread
+            log()
+            
+        except:
+            log_message += time.strftime('%X %x %Z') + ': Manual refreshing failed!\n'
+            log()
+            pass
+
+######################
+#Start the program (tray)
+#
+if __name__ == "__main__":
+
+    log_message += time.strftime('%X %x %Z') + ': Starting the program\n'
+    gtk.gdk.threads_init()
+    
+    # create the grnotify object (and icon)
+    
+    #readConfig() # fix by Eric Lembregts -> needed to know where the icon's are located!!
+    grnotify_app = grnotify()
+    tray_updater = updater()
+    tray_updater.start()
+    
+    gtk.main()
