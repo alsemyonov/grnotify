@@ -9,6 +9,12 @@ import operator
 import threading
 import webbrowser
 
+import gobject
+import dbus
+import dbus.service
+import dbus.mainloop.glib
+
+
 
 try:
     import gtk.glade
@@ -1465,6 +1471,13 @@ class refresh(threading.Thread):
             log()
             pass
 
+class DBusReader(dbus.service.Object):
+  @dbus.service.method("org.gnome.feed.Reader", 
+                        in_signature="s", out_signature="b")
+  def Subscribe(self, url):
+    print (str(url))
+    return False
+
 ######################
 #Start the program (tray)
 #
@@ -1480,4 +1493,11 @@ if __name__ == "__main__":
     tray_updater = updater()
     tray_updater.start()
     
+    # Make DBus object
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    session_bus = dbus.SessionBus()
+    name = dbus.service.BusName("org.gnome.feed.Reader", session_bus)
+    reader = DBusReader(session_bus, '/org/gnome/feed/Reader')
+    mainloop = gobject.MainLoop()
+
     gtk.main()
