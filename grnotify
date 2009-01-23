@@ -1475,8 +1475,24 @@ class DBusReader(dbus.service.Object):
   @dbus.service.method("org.gnome.feed.Reader", 
                         in_signature="s", out_signature="b")
   def Subscribe(self, url):
-    print (str(url))
-    return False
+    try:
+      req = Request('http://www.google.com/reader/api/0/token')
+      f = urlopen(req)
+      token = f.read()
+      
+      data = {'s': 'feed/' + url, 'T': token, 'ac': 'subscribe'}
+      data = urllib.urlencode(data)
+      req = Request('http://www.google.com/reader/api/0/subscription/edit?client=contact:' + email, data)
+      f = urlopen (req)
+
+      global feedsChanged
+      feedsChanged = 1		
+      updateFeeds()
+      refresh().start()
+
+      return True
+    except:
+      return False
 
 ######################
 #Start the program (tray)
